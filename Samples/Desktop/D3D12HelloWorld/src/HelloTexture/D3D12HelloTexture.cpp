@@ -11,6 +11,7 @@
 
 #include "stdafx.h"
 #include "D3D12HelloTexture.h"
+#include <dxcapi.h>
 
 D3D12HelloTexture::D3D12HelloTexture(UINT width, UINT height, std::wstring name) :
     DXSample(width, height, name),
@@ -141,6 +142,48 @@ void D3D12HelloTexture::LoadPipeline()
     ThrowIfFailed(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocator)));
 }
 
+static ComPtr<IDxcBlob> compileShader(ComPtr<IDxcUtils> pUtils, ComPtr<IDxcCompiler3> pCompiler, const wchar_t* path, const wchar_t* entry, const wchar_t* profile)
+{
+	// Load shader source code from file
+	ComPtr<IDxcBlobEncoding> pSourceBlob;
+	pUtils->LoadFile(path, nullptr, &pSourceBlob);
+
+	// Set up compile arguments
+	std::vector<LPCWSTR> arguments = { L"-E", entry , L"-T",profile };
+#ifdef _DEBUG
+	arguments.insert(arguments.end(), { L"-Zi", L"-Qembed_debug" });
+#else
+	arguments.push_back(L"-Qstrip_debug");
+	arguments.push_back(L"-Qstrip_reflect");
+#endif // _DEBUG
+
+	DxcBuffer sourceBuffer;
+	sourceBuffer.Ptr = pSourceBlob->GetBufferPointer();
+	sourceBuffer.Size = pSourceBlob->GetBufferSize();
+	sourceBuffer.Encoding = 0;
+
+	ComPtr<IDxcResult> pCompileResult;
+	auto hr = pCompiler->Compile(&sourceBuffer, arguments.data(), (uint32_t)arguments.size(), nullptr, IID_PPV_ARGS(pCompileResult.GetAddressOf()));
+	if (FAILED(hr))
+	{
+		return nullptr;
+	}
+
+	// Check for compilation errors
+	ComPtr<IDxcBlobUtf8> pErrors;
+	pCompileResult->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&pErrors), nullptr);
+	if (pErrors && pErrors->GetStringLength() > 0)
+	{
+		OutputDebugStringA(pErrors->GetStringPointer());
+		return nullptr;
+	}
+
+	ComPtr<IDxcBlob> pShaderBlob;
+	pCompileResult->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&pShaderBlob), nullptr);
+
+	return pShaderBlob;
+}
+
 // Load the sample assets.
 void D3D12HelloTexture::LoadAssets()
 {
@@ -177,8 +220,14 @@ void D3D12HelloTexture::LoadAssets()
         sampler.RegisterSpace = 0;
         sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+        D3D12_ROOT_SIGNATURE_FLAGS flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+#ifndef BOUND_TEXTURES
+		flags |= D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED;
+#endif
+
         CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
-        rootSignatureDesc.Init_1_1(_countof(rootParameters), rootParameters, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+        rootSignatureDesc.Init_1_1(_countof(rootParameters), rootParameters, 1, &sampler, flags);
 
         ComPtr<ID3DBlob> signature;
         ComPtr<ID3DBlob> error;
@@ -188,18 +237,18 @@ void D3D12HelloTexture::LoadAssets()
 
     // Create the pipeline state, which includes compiling and loading shaders.
     {
-        ComPtr<ID3DBlob> vertexShader;
-        ComPtr<ID3DBlob> pixelShader;
+		ComPtr<IDxcUtils> pUtils;
+		ComPtr<IDxcCompiler3> pCompiler;
+		DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&pUtils));
+		DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&pCompiler));
 
-#if defined(_DEBUG)
-        // Enable better shader debugging with the graphics debugging tools.
-        UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+		auto vertexShader = compileShader(pUtils, pCompiler, GetAssetFullPath(L"shaders.hlsl").c_str(), L"VSMain", L"vs_6_6");
+
+#ifdef BOUND_TEXTURES
+		auto pixelShader = compileShader(pUtils, pCompiler, GetAssetFullPath(L"shaders.hlsl").c_str(), L"PSMain", L"ps_6_6");
 #else
-        UINT compileFlags = 0;
+		auto pixelShader = compileShader(pUtils, pCompiler, GetAssetFullPath(L"shaders.hlsl").c_str(), L"PSMainBindless", L"ps_6_6");
 #endif
-
-        ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"shaders.hlsl").c_str(), nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, nullptr));
-        ThrowIfFailed(D3DCompileFromFile(GetAssetFullPath(L"shaders.hlsl").c_str(), nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, nullptr));
 
         // Define the vertex input layout.
         D3D12_INPUT_ELEMENT_DESC inputElementDescs[] =
@@ -212,8 +261,8 @@ void D3D12HelloTexture::LoadAssets()
         D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
         psoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
         psoDesc.pRootSignature = m_rootSignature.Get();
-        psoDesc.VS = CD3DX12_SHADER_BYTECODE(vertexShader.Get());
-        psoDesc.PS = CD3DX12_SHADER_BYTECODE(pixelShader.Get());
+        psoDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() };
+        psoDesc.PS = { pixelShader->GetBufferPointer(), pixelShader->GetBufferSize() };
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
         psoDesc.DepthStencilState.DepthEnable = FALSE;

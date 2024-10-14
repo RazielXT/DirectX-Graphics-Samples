@@ -23,7 +23,7 @@ PSInput VSMain(float4 position : POSITION, float4 uv : TEXCOORD)
     PSInput result;
 
     result.position = position;
-    result.uv = uv;
+    result.uv = uv.xy;
 
     return result;
 }
@@ -31,4 +31,14 @@ PSInput VSMain(float4 position : POSITION, float4 uv : TEXCOORD)
 float4 PSMain(PSInput input) : SV_TARGET
 {
     return g_texture.Sample(g_sampler, input.uv);
+}
+
+Texture2D<float4> GetTexture(uint index)
+{
+    return ResourceDescriptorHeap[index];
+}
+
+float4 PSMainBindless(PSInput input) : SV_TARGET
+{
+    return GetTexture(0).Sample(g_sampler, input.uv);
 }
